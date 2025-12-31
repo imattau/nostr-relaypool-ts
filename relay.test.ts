@@ -1,11 +1,10 @@
 /* eslint-env jest */
 
 import {
-  generatePrivateKey,
-  getEventHash,
+  generateSecretKey,
   getPublicKey,
   type Event,
-  getSignature,
+  finalizeEvent,
 } from "nostr-tools";
 
 import type {Relay} from "./relay";
@@ -51,22 +50,14 @@ test("connectivity", () => {
 async function publishAndGetEvent(
   options: {content?: string} = {}
 ): Promise<Event> {
-  const sk = generatePrivateKey();
-  const pk = getPublicKey(sk);
-  const unsignedEvent = {
+  const sk = generateSecretKey();
+  const eventTemplate = {
     kind: 27572,
-    pubkey: pk,
     created_at: Math.floor(Date.now() / 1000),
     tags: [],
     content: options.content || "nostr-tools test suite",
   };
-  const eventId = getEventHash(unsignedEvent);
-  //  const eventId = getEventHash(unsignedEvent);
-  const event: Event = {
-    sig: getSignature(unsignedEvent, sk),
-    id: eventId,
-    ...unsignedEvent,
-  };
+  const event = finalizeEvent(eventTemplate, sk);
   // console.log("publishing event", event);
   relay.publish(event);
   return new Promise((resolve) =>
@@ -112,7 +103,7 @@ test("querying", async () => {
 });
 
 test("listening (twice) and publishing", async () => {
-  const sk = generatePrivateKey();
+  const sk = generateSecretKey();
   const pk = getPublicKey(sk);
   var resolve1: (success: boolean) => void;
   var resolve2: (success: boolean) => void;
@@ -137,17 +128,13 @@ test("listening (twice) and publishing", async () => {
     resolve2(true);
   });
 
-  const event = {
+  const eventTemplate = {
     kind: 27572,
-    pubkey: pk,
     created_at: Math.floor(Date.now() / 1000),
     tags: [],
     content: "nostr-tools test suite",
   };
-  // @ts-ignore
-  event.id = getEventHash(event);
-  // @ts-ignore
-  event.sig = getSignature(event, sk);
+  const event = finalizeEvent(eventTemplate, sk);
   // @ts-ignore
   relay.publish(event);
   return expect(
@@ -163,20 +150,16 @@ test("listening (twice) and publishing", async () => {
 });
 
 test("two subscriptions", async () => {
-  const sk = generatePrivateKey();
+  const sk = generateSecretKey();
   const pk = getPublicKey(sk);
 
-  const event = {
+  const eventTemplate = {
     kind: 27572,
-    pubkey: pk,
     created_at: Math.floor(Date.now() / 1000),
     tags: [],
     content: "nostr-tools test suite",
   };
-  // @ts-ignore
-  event.id = getEventHash(event);
-  // @ts-ignore
-  event.sig = getSignature(event, sk);
+  const event = finalizeEvent(eventTemplate, sk);
 
   await expect(
     new Promise((resolve) => {

@@ -3,7 +3,7 @@
 // Don't rely on Relay interface, it will change (I'll probably delete a lot of code from here, there's no need for
 // multiple listeners)
 
-import {type Event, verifySignature, validateEvent} from "nostr-tools";
+import {type Event, verifyEvent, validateEvent} from "nostr-tools";
 import {type Filter, matchFilters} from "nostr-tools";
 import WebSocket from "isomorphic-ws";
 import {getHex64, getSubName} from "./fakejson";
@@ -186,7 +186,7 @@ class RelayC {
           if (
             validateEvent(event) &&
             this.openSubs[id] &&
-            (this.openSubs[id].skipVerification || verifySignature(event)) &&
+            (this.openSubs[id].skipVerification || verifyEvent(event)) &&
             matchFilters(this.openSubs[id].filters, event)
           ) {
             this.openSubs[id];

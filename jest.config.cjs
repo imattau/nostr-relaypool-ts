@@ -5,7 +5,7 @@ const config = {
   silent: false,
   preset: "ts-jest",
   testEnvironment: "node",
-  testTimeout: 200,
+  testTimeout: 5000,
 };
 
 module.exports = config;

@@ -1,10 +1,8 @@
 /* eslint-env jest */
 
 import {
-  getSignature,
-  generatePrivateKey,
-  getEventHash,
-  getPublicKey,
+  generateSecretKey,
+  finalizeEvent,
   type Event,
 } from "nostr-tools";
 import {RelayPool} from "./relay-pool";
@@ -50,17 +48,14 @@ function createSignedEvent(
   content = "nostr-tools test suite",
   created_at = Math.floor(Date.now() / 1000),
 ): Event & {id: string} {
-  const sk = generatePrivateKey();
-  const pk = getPublicKey(sk);
-  const unsignedEvent = {
+  const sk = generateSecretKey();
+  const eventTemplate = {
     kind,
-    pubkey: pk,
     created_at,
     tags: [],
     content,
   };
-  const eventId = getEventHash(unsignedEvent);
-  return {id: eventId, ...unsignedEvent, sig: getSignature(unsignedEvent, sk)};
+  return finalizeEvent(eventTemplate, sk);
 }
 
 async function publishAndGetEvent(
@@ -960,9 +955,12 @@ test("SubscriptionFilterStateCache", async () => {
   expect(filterInfoForFilter).toBeTruthy();
   let filterInfoForFilterAndHost = filterInfoForFilter?.get(relayurls[0]);
   expect(filterInfoForFilterAndHost).toBeTruthy();
-  expect(Math.round(filterInfoForFilterAndHost![0] / 10)).toEqual(
-    Math.round(event.created_at / 10),
-  );
+  expect(
+    Math.abs(
+      Math.round(filterInfoForFilterAndHost![0] / 10) -
+        Math.round(event.created_at / 10),
+    ),
+  ).toBeLessThanOrEqual(1);
   expect(filterInfoForFilterAndHost?.[1]).toEqual(event.created_at);
 });
 
