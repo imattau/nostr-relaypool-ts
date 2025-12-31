@@ -1228,3 +1228,44 @@ test("NIP-57 Zap Flow", async () => {
   // Restore original fetch
   (global.fetch as jest.Mock).mockRestore();
 }, 15000);
+
+test("NIP-50 Search Flow", async () => {
+  const authorSk = generateSecretKey();
+  const authorPk = getPublicKey(authorSk);
+  const searchTerm = "awesome nostr";
+  const targetRelay = "ws://localhost:8083/";
+
+  const searchEvent = finalizeEvent(
+    {
+      kind: Kind.Text,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: `This is an ${searchTerm} event.`,
+    },
+    authorSk,
+  );
+
+  // Publish the search event to the relay
+  relaypool.publish(searchEvent, [targetRelay]);
+  while (_relayServer.events.length < 1) {
+    await sleepms(10);
+  }
+
+  // Subscribe using the search method
+  let receivedSearchEvent: Event | undefined;
+  await new Promise<void>((resolve) => {
+    const sub = relaypool.search(
+      searchTerm,
+      [targetRelay],
+      (event) => {
+        receivedSearchEvent = event;
+        resolve();
+      },
+      0, // Immediate subscription
+    );
+  });
+
+  expect(receivedSearchEvent).toBeDefined();
+  expect(receivedSearchEvent?.id).toBe(searchEvent.id);
+  expect(receivedSearchEvent?.content).toContain(searchTerm);
+});

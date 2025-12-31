@@ -830,6 +830,21 @@ export class RelayPool {
     return { zapRequestEvent, invoice: zapResponse.pr };
   }
 
+  search(
+    query: string,
+    relays: string[] | undefined,
+    onEvent: OnEvent,
+    maxDelayms?: number,
+    onEose?: OnEose,
+    options: SubscriptionOptions = {},
+  ): () => void {
+    const filter = {
+      kinds: [Kind.Text], // NIP-50 typically targets Kind 1 (Short Text Note)
+      search: query,
+    };
+    return this.subscribe([filter], relays, onEvent, maxDelayms, onEose, options);
+  }
+
   onnotice(cb: (url: string, msg: string) => void) {
     this.noticecbs.push(cb);
   }

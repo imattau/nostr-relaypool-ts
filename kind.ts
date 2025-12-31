@@ -31,4 +31,5 @@ export enum Kind {
   Product = 30018,
   Article = 30023,
   Application = 30078,
+  Search = 30402,
 }
