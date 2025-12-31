@@ -1,4 +1,5 @@
-import type {Filter, Event} from "nostr-tools";
+import type {Filter, Event, VerifiedEvent} from "nostr-tools";
+import {finalizeEvent} from "nostr-tools";
 import {mergeSimilarAndRemoveEmptyFilters} from "./merge-similar-filters";
 import {type Relay, relayInit, type Sub} from "./relay";
 import type {OnEventObject, OnEvent} from "./on-event-filters";
@@ -231,24 +232,23 @@ export class RelayPool {
       this.externalGetEventById
         ? this.externalGetEventById
         : this.eventCache
-        ? (id) => this.eventCache?.getEventById(id)
-        : undefined,
-      this.autoReconnect
+          ? (id) => this.eventCache?.getEventById(id)
+          : undefined,
+      this.autoReconnect,
     );
     this.relayByUrl.set(relay, relayInstance);
-
-    relayInstance.on("notice", (msg: string) => {
-      this.noticecbs.forEach((cb) => cb(relay, msg));
-    });
     relayInstance.on("auth", (challenge: string) => {
       this.authcbs.forEach((cb) => cb(relayInstance, challenge));
     });
-
     relayInstance.connect().then(
-      (onfulfilled) => {},
+      (onfulfilled) => {
+        relayInstance?.on("notice", (msg: string) => {
+          this.noticecbs.forEach((cb) => cb(relay, msg));
+        });
+      },
       (onrejected) => {
         this.errorcbs.forEach((cb) => cb(relay, onrejected));
-      }
+      },
     );
     return relayInstance;
   }
@@ -713,6 +713,24 @@ export class RelayPool {
       const instance = this.addOrGetRelay(relay);
       instance.publish(event);
     }
+  }
+
+  authenticate(relayUrl: string, challenge: string, privateKey: string) {
+    const event = finalizeEvent(
+      {
+        kind: Kind.ClientAuth,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["relay", relayUrl],
+          ["challenge", challenge],
+        ],
+        content: "",
+      },
+      privateKey as any
+    );
+
+    const instance = this.addOrGetRelay(relayUrl);
+    instance.auth(event);
   }
 
   onnotice(cb: (url: string, msg: string) => void) {

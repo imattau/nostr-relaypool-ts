@@ -870,6 +870,7 @@ test("delayfiltering", async () => {
 });
 
 test("auth", async () => {
+  const sk = generateSecretKey();
   _relayServer.auth = "123";
   relaypool.close();
   const relaypool2 = new RelayPool(relayurls, {
@@ -878,9 +879,8 @@ test("auth", async () => {
   });
   await expect(
     new Promise((resolve) => {
-      console.log("Setting up onauth listener");
       relaypool2.onauth((relay, challenge) => {
-        console.log("onauth callback triggered for", relay.url, "with challenge", challenge);
+        relaypool2.authenticate(relay.url, challenge, sk as any);
         resolve(true);
       });
     }),

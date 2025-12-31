@@ -21,10 +21,6 @@ export type Relay = {
   on: (type: RelayEvent, cb: any) => void;
   off: (type: RelayEvent, cb: any) => void;
 };
-export type Pub = {
-  on: (type: "ok" | "seen" | "failed", cb: any) => void;
-  off: (type: "ok" | "seen" | "failed", cb: any) => void;
-};
 export type Sub = {
   sub: (filters: Filter[], opts: SubscriptionOptions) => Sub;
   unsub: () => void;
@@ -83,6 +79,7 @@ class RelayC {
         }
       | undefined;
   } = {};
+  authListener: ((challenge: string) => void) | undefined;
   pubListeners: {
     [eventid: string]: {
       ok: Array<() => void>;
@@ -219,7 +216,7 @@ class RelayC {
         case "AUTH":
           if (data.length !== 2) return;
           const challenge = data[1];
-          this.listeners.auth.forEach((cb) => cb(challenge));
+          this.authListener?.(challenge);
           return;
       }
     }
@@ -313,15 +310,23 @@ class RelayC {
     });
   }
   on(type: RelayEvent, cb: any) {
-    this.listeners[type].push(cb);
-    if (type === "connect" && this.ws?.readyState === 1) {
-      cb();
+    if (type === "auth") {
+      this.authListener = cb;
+    } else {
+      this.listeners[type].push(cb);
+      if (type === "connect" && this.ws?.readyState === 1) {
+        cb();
+      }
     }
   }
 
   off(type: RelayEvent, cb: any) {
-    const index = this.listeners[type].indexOf(cb);
-    if (index !== -1) this.listeners[type].splice(index, 1);
+    if (type === "auth") {
+      this.authListener = undefined;
+    } else {
+      const index = this.listeners[type].indexOf(cb);
+      if (index !== -1) this.listeners[type].splice(index, 1);
+    }
   }
 
   publish(event: Event): Pub {
