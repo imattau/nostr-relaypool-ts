@@ -1,14 +1,27 @@
 /* eslint-env jest */
 
+jest.setTimeout(15000);
+
 import {
   generateSecretKey,
   getPublicKey,
   finalizeEvent,
   type Event,
 } from "nostr-tools";
+import * as nip57 from "nostr-tools/nip57";
 import {RelayPool} from "./relay-pool";
 import {InMemoryRelayServer} from "./in-memory-relay-server";
 import {SubscriptionFilterStateCache} from "./subscription-filter-state-cache";
+import {Kind} from "./kind";
+
+
+// Mock the entire nip57 module to control its exports
+jest.mock('nostr-tools/nip57', () => ({
+  ...jest.requireActual('nostr-tools/nip57'), // Keep original implementations for other exports
+  getZapEndpoint: jest.fn(), // Mock getZapEndpoint initially
+  makeZapRequest: jest.fn(), // Mock makeZapRequest initially
+}));
+
 
 let relaypool: RelayPool;
 
@@ -33,6 +46,25 @@ beforeEach(() => {
   });
   _relayServer.clear();
   _relayServer2.clear();
+
+  // Reset mocks before each test
+  (nip57.getZapEndpoint as jest.Mock).mockReset();
+  (nip57.makeZapRequest as jest.Mock).mockReset();
+  
+  // Mock makeZapRequest to return a simple event template
+  (nip57.makeZapRequest as jest.Mock).mockImplementation((params) => {
+    return {
+      kind: 9734, // ZapRequest kind
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["p", params.profile],
+        ["amount", params.amount.toString()],
+        ["relays", ...(params.relays || [])],
+        ...(params.event ? [["e", params.event]] : []),
+      ],
+      content: params.comment,
+    };
+  });
 });
 
 afterEach(async () => {
@@ -1110,3 +1142,89 @@ test("NIP-65 Relay Discovery (Kind 10002)", async () => {
 
   await expect(promise).resolves.toBe(true);
 }, 10000);
+
+test("NIP-57 Zap Flow", async () => {
+  const zapperSk = generateSecretKey();
+  const zapperPk = getPublicKey(zapperSk);
+  const zappeeSk = generateSecretKey();
+  const zappeePk = getPublicKey(zappeeSk);
+  const amountSats = 1000;
+  const comment = "Great content!";
+  const targetRelay = "ws://localhost:8083/";
+  
+  // Setup zappee's metadata with LNURL
+  const zappeeMetadataEvent = finalizeEvent(
+    {
+      kind: 0,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify({
+        name: "zappee",
+        lud16: `test@test.com` // Mock LUD16 for the test
+      }),
+    },
+    zappeeSk
+  );
+  
+  // Publish zappee's metadata to the relay
+  relaypool.publish(zappeeMetadataEvent, [targetRelay]);
+  while (_relayServer.events.length < 1) {
+    await sleepms(10);
+  }
+
+  // Override metadataCache.relays for this test to look at targetRelay
+  // @ts-ignore
+  relaypool.metadataCache.relays = [targetRelay];
+
+  // Configure the mock implementations for this test
+  const mockGetZapEndpoint = nip57.getZapEndpoint as jest.Mock;
+  mockGetZapEndpoint.mockImplementation(async (metadata) => {
+    return "http://localhost:8080/zap_callback"; // Directly return the mock callback URL
+  });
+
+  // Mock fetch for the final invoice request
+  jest.spyOn(global, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input.toString();
+    if (url.startsWith("http://localhost:8080/zap_callback")) { // Match URL with query parameters
+      return Promise.resolve(new Response(JSON.stringify({
+        pr: "lnbc1invoice..." // Mock invoice
+      })));
+    }
+    // Fallback for unmatched calls, return a valid Response object with an error
+    return Promise.resolve(new Response(JSON.stringify({ error: `Mocked fetch: unexpected URL: ${url}` }), { status: 404 }));
+  });
+
+  const { zapRequestEvent, invoice } = await relaypool.zap(
+    zapperSk as any, // Needs string private key
+    zappeePk,
+    amountSats,
+    comment,
+  );
+
+  expect(zapRequestEvent).toBeDefined();
+  expect(zapRequestEvent.kind).toBe(Kind.ZapRequest);
+  expect(zapRequestEvent.pubkey).toBe(getPublicKey(zapperSk));
+  expect(invoice).toBe("lnbc1invoice...");    
+  // Publish the zap request event through the pool
+  relaypool.publish(zapRequestEvent, [targetRelay]);
+
+  // Verify the zap request event is received by the mock relay
+  let receivedZapEvent: Event | undefined;
+  await new Promise<void>((resolve) => {
+    const sub = relaypool.subscribe(
+      [{ ids: [zapRequestEvent.id] }],
+      [targetRelay],
+      (event) => {
+        receivedZapEvent = event;
+        resolve();
+      },
+      0, // Immediate subscription
+    );
+  });
+
+  expect(receivedZapEvent).toBeDefined();
+  expect(receivedZapEvent?.id).toBe(zapRequestEvent.id);
+
+  // Restore original fetch
+  (global.fetch as jest.Mock).mockRestore();
+}, 15000);

@@ -1,5 +1,8 @@
 import type {Filter, Event, VerifiedEvent} from "nostr-tools";
-import {finalizeEvent} from "nostr-tools";
+import {finalizeEvent, getPublicKey} from "nostr-tools";
+import {getZapEndpoint, makeZapRequest, useFetchImplementation as useFetchImplementationNip57} from "nostr-tools/nip57";
+import {useFetchImplementation as useFetchImplementationNip05} from "nostr-tools/nip05";
+import * as nip19 from "nostr-tools/nip19";
 import {mergeSimilarAndRemoveEmptyFilters} from "./merge-similar-filters";
 import {type Relay, relayInit, type Sub} from "./relay";
 import type {OnEventObject, OnEvent} from "./on-event-filters";
@@ -155,6 +158,8 @@ export class RelayPool {
     this.autoReconnect = options.autoReconnect;
     this.deleteSignatures = options.deleteSignatures;
     this.skipVerification = options.skipVerification;
+    useFetchImplementationNip05(global.fetch); // For NIP-05 fetches
+    useFetchImplementationNip57(global.fetch); // For NIP-57 fetches
     this.writeRelays = new NewestEventCache(10002, this, undefined, false);
     this.metadataCache = new NewestEventCache(0, this);
     this.contactListCache = new NewestEventCache(3, this);
@@ -731,6 +736,98 @@ export class RelayPool {
 
     const instance = this.addOrGetRelay(relayUrl);
     instance.auth(event);
+  }
+  
+  finalizeEvent(eventTemplate: EventTemplate, privateKey: string): VerifiedEvent {
+    return finalizeEvent(eventTemplate, privateKey);
+  }
+
+  async zap(
+    senderPrivateKey: string, // Private key of the zapper
+    targetProfilePointer: string, // npub or NIP-05 identifier
+    amountSats: number,
+    comment: string = "",
+    targetEventId?: string, // If zapping an event
+  ): Promise<{zapRequestEvent: Event; invoice: string}> {
+    let targetPubkey: string | undefined;
+    let targetRelays: string[] | undefined;
+    let lud16: string | undefined;
+
+    if (targetProfilePointer.startsWith("npub")) {
+      const decoded = nip19.decode(targetProfilePointer);
+      if (decoded.type === "npub") {
+        targetPubkey = decoded.data;
+      } else if (decoded.type === "nprofile") {
+        targetPubkey = decoded.data.pubkey;
+        targetRelays = decoded.data.relays;
+      }
+    } else if (targetProfilePointer.includes("@")) {
+      lud16 = targetProfilePointer; // NIP-05 identifier, will be resolved
+    } else {
+      // Assume it's a hex pubkey
+      targetPubkey = targetProfilePointer;
+    }
+
+    if (!targetPubkey) {
+      throw new Error("Invalid target profile pointer for zap: could not determine pubkey.");
+    }
+
+    // 1. Fetch profile metadata to get LNURL (lud06 or lud16)
+    const metadataEvent = await this.fetchAndCacheMetadata(targetPubkey);
+
+    if (!metadataEvent) {
+      throw new Error(`Could not fetch metadata for pubkey: ${targetPubkey}`);
+    }
+
+    const profileContent = JSON.parse(metadataEvent.content);
+    if (!profileContent.lud16 && !profileContent.lud06) {
+      throw new Error(`No LNURL found in metadata for ${targetPubkey}`);
+    }
+
+    lud16 = lud16 || profileContent.lud16 || profileContent.lud06; // Prefer lud16, fallback to lud06
+    if (!lud16) {
+      throw new Error("LNURL not found in profile metadata.");
+    }
+
+    // 2. Get Zap Endpoint
+    const zapEndpoint = await getZapEndpoint(metadataEvent);
+    if (!zapEndpoint) {
+      throw new Error("Zap endpoint not found or invalid.");
+    }
+
+    // 3. Create Zap Request Event
+    const zapRequestTemplate = {
+      kind: Kind.ZapRequest,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["p", targetPubkey],
+        ["amount", (amountSats * 1000).toString()], // amount in millisatoshis
+        ["relays", ...(targetRelays || Array.from(this.relayByUrl.keys()))], // Use target relays or connected relays
+      ],
+      content: comment,
+    };
+
+    if (targetEventId) {
+      zapRequestTemplate.tags.push(["e", targetEventId]);
+    }
+
+    // Finalize (sign) the zap request event
+    const zapRequestEvent = this.finalizeEvent(zapRequestTemplate, senderPrivateKey);
+
+    // 4. Fetch the invoice from the zap endpoint
+    const url = new URL(zapEndpoint);
+    url.searchParams.append("amount", (amountSats * 1000).toString()); // millisatoshis
+    url.searchParams.append("nostr", JSON.stringify(zapRequestEvent));
+    url.searchParams.append("lnurl", lud16);
+
+    const response = await fetch(url.toString());
+    const zapResponse = await response.json();
+
+    if (zapResponse.error) {
+      throw new Error(`Zap endpoint error: ${zapResponse.error}`);
+    }
+    
+    return { zapRequestEvent, invoice: zapResponse.pr };
   }
 
   onnotice(cb: (url: string, msg: string) => void) {

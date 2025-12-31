@@ -13,6 +13,8 @@ build({
   outfile: "lib/nostr-relaypool.esm.js",
   format: "esm",
   packages: "external",
+  external: ["node:*"], // Exclude node built-ins for ESM build
+  platform: "browser",
 }).then(() => console.log("esm build success."));
 
 build({
@@ -20,6 +22,8 @@ build({
   outfile: "lib/nostr-relaypool.cjs",
   format: "cjs",
   packages: "external",
+  external: ["node:*"], // Exclude node built-ins for CJS build
+  platform: "node", // Target Node.js for CJS build
 }).then(() => console.log("cjs build success."));
 
 build({
@@ -32,6 +36,8 @@ build({
     global: "self",
     process: '{"env": {}}',
   },
+  external: ["node:*"], // Exclude node built-ins for standalone build
+  platform: "browser",
 }).then(() => console.log("standalone build success."));
 
 // build worker
@@ -44,5 +50,6 @@ build({
     ".ts": "ts",
   },
   entryPoints: ["relay-pool.worker.ts"],
-  external: ["@nostr/core"],
+  external: ["@nostr/core", "node:*"], // Exclude node built-ins for worker build
+  platform: "browser",
 }).then(() => console.log("worker build success."));
