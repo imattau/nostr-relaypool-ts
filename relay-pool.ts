@@ -231,23 +231,24 @@ export class RelayPool {
       this.externalGetEventById
         ? this.externalGetEventById
         : this.eventCache
-          ? (id) => this.eventCache?.getEventById(id)
-          : undefined,
-      this.autoReconnect,
+        ? (id) => this.eventCache?.getEventById(id)
+        : undefined,
+      this.autoReconnect
     );
     this.relayByUrl.set(relay, relayInstance);
+
+    relayInstance.on("notice", (msg: string) => {
+      this.noticecbs.forEach((cb) => cb(relay, msg));
+    });
+    relayInstance.on("auth", (challenge: string) => {
+      this.authcbs.forEach((cb) => cb(relayInstance, challenge));
+    });
+
     relayInstance.connect().then(
-      (onfulfilled) => {
-        relayInstance?.on("notice", (msg: string) => {
-          this.noticecbs.forEach((cb) => cb(relay, msg));
-        });
-        relayInstance?.on("auth", (msg: string) => {
-          this.authcbs.forEach((cb) => cb(relayInstance, msg));
-        });
-      },
+      (onfulfilled) => {},
       (onrejected) => {
         this.errorcbs.forEach((cb) => cb(relay, onrejected));
-      },
+      }
     );
     return relayInstance;
   }

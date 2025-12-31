@@ -878,11 +878,15 @@ test("auth", async () => {
   });
   await expect(
     new Promise((resolve) => {
-      relaypool2.onauth(() => resolve(true));
+      console.log("Setting up onauth listener");
+      relaypool2.onauth((relay, challenge) => {
+        console.log("onauth callback triggered for", relay.url, "with challenge", challenge);
+        resolve(true);
+      });
     }),
   ).resolves.toBe(true);
   await relaypool2.close();
-});
+}, 10000);
 
 test("dontSendOtherFilters", async () => {
   const event = createSignedEvent();
