@@ -2,6 +2,7 @@
 
 import {
   generateSecretKey,
+  getPublicKey,
   finalizeEvent,
   type Event,
 } from "nostr-tools";
@@ -1042,3 +1043,66 @@ test("_continue", async () => {
     );
   });
 });
+
+test("NIP-65 Relay Discovery (Kind 10002)", async () => {
+  const authorSk = generateSecretKey();
+  const authorPk = getPublicKey(authorSk);
+  const writeRelay = "ws://localhost:8083/";
+
+  const relayListEvent = finalizeEvent(
+    {
+      kind: 10002,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["r", writeRelay, "write"]],
+      content: "",
+    },
+    authorSk,
+  );
+
+  // Use a second relay to host the relay list
+  const discoveryRelay = relayurls2[0];
+  relaypool.publish(relayListEvent, [discoveryRelay]);
+
+  // Wait for the event to be processed by the server
+  while (_relayServer2.events.length < 1) {
+    await sleepms(10);
+  }
+
+  // Set the discovery relay as the default for NewestEventCache to find the relay list
+  relaypool.addOrGetRelay(discoveryRelay);
+  // @ts-ignore
+  relaypool.writeRelays.relays = [discoveryRelay];
+
+  const testEvent = finalizeEvent(
+    {
+      kind: 1,
+      created_at: Math.floor(Date.now() / 1000) + 10,
+      tags: [],
+      content: "Hello Outbox!",
+    },
+    authorSk,
+  );
+
+  // Publish the test event to the write relay
+  relaypool.publish(testEvent, [writeRelay]);
+  while (_relayServer.events.length < 1) {
+    await sleepms(10);
+  }
+
+  // Subscribe to the author's events without specifying relays
+  // It should discover the write relay via NIP-65
+  const promise = new Promise((resolve) => {
+    relaypool.subscribe(
+      [{authors: [authorPk]}],
+      undefined,
+      (event) => {
+        if (event.id === testEvent.id) {
+          resolve(true);
+        }
+      },
+      0,
+    );
+  });
+
+  await expect(promise).resolves.toBe(true);
+}, 10000);

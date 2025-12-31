@@ -9,6 +9,7 @@ import {
   groupFiltersByRelayAndEmitCacheHits,
 } from "./group-filters-by-relay";
 import type {CallbackReplayer} from "./callback-replayer";
+import {Kind} from "./kind";
 import {NewestEventCache} from "./newest-event-cache";
 import {SubscriptionFilterStateCache} from "./subscription-filter-state-cache";
 
@@ -42,6 +43,27 @@ function parseJSON(json: string | undefined) {
   if (json) {
     return JSON.parse(json);
   }
+}
+
+function parseNip65Relays(event: Event | undefined): string[] | undefined {
+  if (!event) {
+    return undefined;
+  }
+  if (event.kind === 10002) {
+    const relays: string[] = [];
+    for (const tag of event.tags) {
+      if (tag[0] === "r" && tag[1]) {
+        const url = tag[1];
+        const mode = tag[2]; // undefined (both), "read", or "write"
+        if (mode === undefined || mode === "write") {
+          relays.push(url);
+        }
+      }
+    }
+    return relays.length > 0 ? relays : undefined;
+  }
+  // Fallback for Kind 10003 or Kind 3 (legacy)
+  return parseJSON(event.content);
 }
 
 function registerSubscriptionFilterStateCache(
@@ -131,7 +153,7 @@ export class RelayPool {
     this.autoReconnect = options.autoReconnect;
     this.deleteSignatures = options.deleteSignatures;
     this.skipVerification = options.skipVerification;
-    this.writeRelays = new NewestEventCache(10003, this, undefined, true);
+    this.writeRelays = new NewestEventCache(10002, this, undefined, false);
     this.metadataCache = new NewestEventCache(0, this);
     this.contactListCache = new NewestEventCache(3, this);
     if (options.useEventCache) {
@@ -486,7 +508,7 @@ export class RelayPool {
       promises.push(
         this.writeRelays
           ?.get(author)
-          .then((event) => parseJSON(event?.content))
+          .then((event) => parseNip65Relays(event))
           .catch(() => options?.defaultRelays || []),
       );
       allAuthorsArray.push(author);
@@ -727,10 +749,9 @@ export class RelayPool {
       pubkey: "",
       id: "",
       sig: "",
-      content: JSON.stringify(writeRelays),
-      // @ts-ignore
-      kind: 10003,
-      tags: [["p", pubkey]],
+      content: "",
+      kind: Kind.RelayList,
+      tags: writeRelays.map((r) => ["r", r, "write"]),
     };
     this.writeRelays.data.set(pubkey, event);
   }
