@@ -139,6 +139,7 @@ export class RelayPool {
     relays?: string[],
     options: {
       useEventCache?: boolean;
+      eventCacheCapacity?: number;
       externalGetEventById?: (id: string) => Event | undefined;
       logSubscriptions?: boolean;
       autoReconnect?: boolean;
@@ -157,7 +158,7 @@ export class RelayPool {
     this.metadataCache = new NewestEventCache(0, this);
     this.contactListCache = new NewestEventCache(3, this);
     if (options.useEventCache) {
-      this.eventCache = new EventCache();
+      this.eventCache = new EventCache(options.eventCacheCapacity);
     }
     if (options.subscriptionCache) {
       this.subscriptionCache = new Map();
