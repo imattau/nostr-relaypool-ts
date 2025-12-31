@@ -1269,3 +1269,41 @@ test("NIP-50 Search Flow", async () => {
   expect(receivedSearchEvent?.id).toBe(searchEvent.id);
   expect(receivedSearchEvent?.content).toContain(searchTerm);
 });
+
+test("signEvent functionality", async () => {
+  const testSk = generateSecretKey();
+  const testPk = getPublicKey(testSk);
+  const eventTemplate = {
+    kind: Kind.Text,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [],
+    content: "Test event for signing",
+  };
+
+  // Test 1: Local signing with private key
+  const signedEventLocal = await relaypool.signEvent(eventTemplate, testSk as any);
+  expect(signedEventLocal).toBeDefined();
+  expect(signedEventLocal.pubkey).toBe(testPk);
+  expect(signedEventLocal.id).toBeDefined();
+  expect(signedEventLocal.sig).toBeDefined();
+
+  // Test 2: Signing with an external signer function
+  const mockExternalSigner = jest.fn(async (template: EventTemplate) => {
+    // Simulate window.nostr.signEvent
+    const pk = getPublicKey(testSk); // External signer would know its pubkey
+    const signed = finalizeEvent(template, testSk);
+    return Promise.resolve({ ...signed, pubkey: pk }); // Return a signed event
+  });
+
+  const signedEventExternal = await relaypool.signEvent(eventTemplate, undefined, mockExternalSigner);
+  expect(signedEventExternal).toBeDefined();
+  expect(signedEventExternal.pubkey).toBe(testPk);
+  expect(signedEventExternal.id).toBeDefined();
+  expect(signedEventExternal.sig).toBeDefined();
+  expect(mockExternalSigner).toHaveBeenCalledWith(eventTemplate);
+
+  // Test 3: Error if no signer or private key is provided
+  await expect(relaypool.signEvent(eventTemplate, undefined, undefined)).rejects.toThrow(
+    "No private key or signer provided for signing event."
+  );
+});

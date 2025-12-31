@@ -742,6 +742,24 @@ export class RelayPool {
     return finalizeEvent(eventTemplate, privateKey);
   }
 
+  // Abstraction for signing an event, useful for NIP-07 integration
+  async signEvent(
+    eventTemplate: EventTemplate,
+    privateKey?: string, // Local private key for signing
+    signer?: (event: EventTemplate) => Promise<VerifiedEvent> // NIP-07 compatible signer
+  ): Promise<VerifiedEvent> {
+    if (signer) {
+      // Use external signer (e.g., window.nostr)
+      const event = await signer(eventTemplate);
+      return event;
+    } else if (privateKey) {
+      // Use local private key for signing
+      return this.finalizeEvent(eventTemplate, privateKey);
+    } else {
+      throw new Error("No private key or signer provided for signing event.");
+    }
+  }
+
   async zap(
     senderPrivateKey: string, // Private key of the zapper
     targetProfilePointer: string, // npub or NIP-05 identifier
@@ -812,7 +830,7 @@ export class RelayPool {
     }
 
     // Finalize (sign) the zap request event
-    const zapRequestEvent = this.finalizeEvent(zapRequestTemplate, senderPrivateKey);
+    const zapRequestEvent = await this.signEvent(zapRequestTemplate, senderPrivateKey);
 
     // 4. Fetch the invoice from the zap endpoint
     const url = new URL(zapEndpoint);
