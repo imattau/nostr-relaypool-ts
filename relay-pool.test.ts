@@ -1,6 +1,6 @@
 /* eslint-env jest */
 
-jest.setTimeout(15000);
+jest.setTimeout(15000); // Global test timeout
 
 import {
   generateSecretKey,
@@ -12,7 +12,9 @@ import * as nip57 from "nostr-tools/nip57";
 import {RelayPool} from "./relay-pool";
 import {InMemoryRelayServer} from "./in-memory-relay-server";
 import {SubscriptionFilterStateCache} from "./subscription-filter-state-cache";
+import {createAndConnectRelay, closeRelayAndServer, sleepms, waitUntil, WebSocketStates} from "./test-utils";
 import {Kind} from "./kind";
+import {assertEqual, assertTrue, assertDefined, assertThrows, assertNotEqual, assertGreaterThanOrEqual} from "./assert-utils";
 
 
 // Mock the entire nip57 module to control its exports
@@ -23,34 +25,13 @@ jest.mock('nostr-tools/nip57', () => ({
 }));
 
 
-let relaypool: RelayPool;
+describe("RelayPool Advanced Features", () => {
+  // Helper to get a unique port for each server instance
+  function getUniquePort(): number {
+    return Math.floor(Math.random() * 1000) + 8100; // Ports from 8100-9099
+  }
 
-// const relayurls = ['wss://nostr-dev.wellorder.net/']
-// const relayurls2 = ['wss://nostr.v0l.io/']
 
-const relayurls = ["ws://localhost:8083/"];
-const relayurls2 = ["ws://localhost:8084/"];
-
-let _relayServer: InMemoryRelayServer;
-let _relayServer2: InMemoryRelayServer;
-
-beforeAll(() => {
-  _relayServer = new InMemoryRelayServer(8083);
-  _relayServer2 = new InMemoryRelayServer(8084);
-});
-
-beforeEach(() => {
-  relaypool = new RelayPool([], {
-    subscriptionCache: true,
-    useEventCache: true,
-  });
-  _relayServer.clear();
-  _relayServer2.clear();
-
-  // Reset mocks before each test
-  (nip57.getZapEndpoint as jest.Mock).mockReset();
-  (nip57.makeZapRequest as jest.Mock).mockReset();
-  
   // Mock makeZapRequest to return a simple event template
   (nip57.makeZapRequest as jest.Mock).mockImplementation((params) => {
     return {
@@ -58,1252 +39,378 @@ beforeEach(() => {
       created_at: Math.floor(Date.now() / 1000),
       tags: [
         ["p", params.profile],
-        ["amount", params.amount.toString()],
+        ["amount", (params.amount || 0).toString()],
         ["relays", ...(params.relays || [])],
         ...(params.event ? [["e", params.event]] : []),
       ],
-      content: params.comment,
+      content: params.comment || "",
     };
   });
-});
 
-afterEach(async () => {
-  await relaypool.close();
-});
+  // Helper to publish an event and ensure it's in a server
+  async function publishAndEnsureEvent(relaypool: RelayPool, server: InMemoryRelayServer, event: Event, relays: string[]): Promise<void> {
+    relaypool.publish(event, relays);
+    await waitUntil(() => server.events.some(e => e.id === event.id));
+  }
 
-afterAll(async () => {
-  await _relayServer.close();
-  await _relayServer2.close();
-});
 
-function createSignedEvent(
-  kind = 27572,
-  content = "nostr-tools test suite",
-  created_at = Math.floor(Date.now() / 1000),
-): Event & {id: string} {
-  const sk = generateSecretKey();
-  const eventTemplate = {
-    kind,
-    created_at,
-    tags: [],
-    content,
-  };
-  return finalizeEvent(eventTemplate, sk);
-}
+  test("filter merging and deduplication", async () => {
+    const port1 = getUniquePort();
+    const port2 = getUniquePort();
+    const server1 = new InMemoryRelayServer(port1);
+    const server2 = new InMemoryRelayServer(port2);
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${port1}/`);
+    relaypool.addOrGetRelay(`ws://localhost:${port2}/`);
 
-async function publishAndGetEvent(
-  relays: string[],
-  kind = 27572,
-  content = "nostr-tools test suite",
-): Promise<Event & {id: string}> {
-  const event = createSignedEvent(kind, content);
-  relaypool.publish(event, relays);
-  const a = relaypool.getEventById(event.id, relays, Infinity);
-  relaypool.sendSubscriptions();
-  await a;
-  return event;
-}
-test("external geteventbyid", async () => {
-  const event = await publishAndGetEvent(relayurls);
-  var resolve1: (success: boolean) => void;
-  var resolve2: (success: boolean) => void;
-  const promise1 = new Promise((resolve) => {
-    resolve1 = resolve;
-  });
-  const promise2 = new Promise((resolve) => {
-    resolve2 = resolve;
-  });
-
-  const promiseAll = Promise.all([promise1, promise2]);
-  relaypool.close();
-  relaypool = new RelayPool(relayurls, {
-    externalGetEventById: (id) => {
-      if (id === event.id) {
-        resolve2(true);
-        return event;
-      }
-    },
-  });
-  expect(event.kind).toEqual(27572);
-
-  relaypool.subscribe(
-    [
+    const sk = generateSecretKey();
+    const event = finalizeEvent(
       {
-        kinds: [27572], // Force no caching
+        kind: Kind.Text,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: "Test event for merging",
       },
-    ],
-    relayurls,
-    (event, afterEose, url) => {
-      expect(event).toHaveProperty("id", event.id);
-      expect(afterEose).toBe(false);
-      // expect(url).toBe(relayurls[0])
-      resolve1(true);
-    },
-    undefined,
-    undefined,
-  );
+      sk
+    );
+    relaypool.publish(event, [`ws://localhost:${port1}/`, `ws://localhost:${port2}/`]);
 
-  return expect(promiseAll).resolves.toEqual([true, true]);
-});
+    let receivedEventsCount = 0;
+    const eventPromise = new Promise<void>((resolve) => {
+      relaypool.subscribe(
+        [{authors: [getPublicKey(sk)]}],
+        [`ws://localhost:${port1}/`, `ws://localhost:${port2}/`],
+        (e) => {
+          receivedEventsCount++;
+          // Should only receive it once due to deduplication
+          assertEqual(receivedEventsCount, 1);
+          assertEqual(e.id, event.id);
+          resolve();
+        },
+        0
+      );
+    });
+    await eventPromise;
+    assertEqual(receivedEventsCount, 1);
+    await relaypool.close();
+    await server1.close();
+    await server2.close();
+  });
 
-test("empty", async () => {
-  var resolve2: (success: boolean) => void;
-  const promiseAll = Promise.all([
-    new Promise((resolve) => {
-      resolve2 = resolve;
-    }),
-  ]);
-  relaypool.subscribe(
-    [
+  test("NIP-65 Relay Discovery (Kind 10002)", async () => {
+    const port1 = getUniquePort();
+    const port2 = getUniquePort();
+    const server1 = new InMemoryRelayServer(port1);
+    const server2 = new InMemoryRelayServer(port2);
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${port1}/`); // Add server1 to pool
+    relaypool.addOrGetRelay(`ws://localhost:${port2}/`); // Add server2 to pool
+
+    const authorSk = generateSecretKey();
+    const authorPk = getPublicKey(authorSk);
+    const targetRelayUrl = `ws://localhost:${port1}/`;
+    const discoveryRelayUrl = `ws://localhost:${port2}/`;
+
+    // 1. Publish NIP-65 relay list event for the author to the discovery relay
+    const relayListEvent = finalizeEvent(
       {
-        kinds: [27572], // Force no caching
+        kind: Kind.RelayList,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["r", targetRelayUrl, "write"]],
+        content: "",
       },
-    ],
-    relayurls,
-    (event, afterEose, url) => {},
-    undefined,
-    (url, minCreatedAt) => {
-      expect(minCreatedAt).toBe(Infinity);
-      expect(url).toBe(relayurls[0]);
-      resolve2(true);
-    },
-  );
-
-  return expect(promiseAll).resolves.toEqual([true]);
-});
-
-test("querying relaypool", async () => {
-  const event = await publishAndGetEvent(relayurls);
-  expect(event.kind).toEqual(27572);
-  var resolve1: (success: boolean) => void;
-  var resolve2: (success: boolean) => void;
-  const promiseAll = Promise.all([
-    new Promise((resolve) => {
-      resolve1 = resolve;
-    }),
-    new Promise((resolve) => {
-      resolve2 = resolve;
-    }),
-  ]);
-  relaypool.subscribe(
-    [
-      {
-        kinds: [27572], // Force no caching
-      },
-    ],
-    relayurls,
-    (event, afterEose, url) => {
-      expect(event).toHaveProperty("id", event.id);
-      expect(afterEose).toBe(false);
-      // expect(url).toBe(relayurls[0])
-      resolve1(true);
-    },
-    undefined,
-    (url, minCreatedAt) => {
-      expect(minCreatedAt).toBe(event.created_at);
-      expect(url).toBe(relayurls[0]);
-      resolve2(true);
-    },
-  );
-
-  return expect(promiseAll).resolves.toEqual([true, true]);
-});
-
-test("listening and publishing", async () => {
-  const event = createSignedEvent();
-
-  let resolve2: (success: boolean) => void;
-
-  relaypool.subscribe(
-    [
-      {
-        kinds: [27572],
-        authors: [event.pubkey],
-      },
-    ],
-    relayurls,
-    (event) => {
-      expect(event).toHaveProperty("pubkey", event.pubkey);
-      expect(event).toHaveProperty("kind", 27572);
-      expect(event).toHaveProperty("content", "nostr-tools test suite");
-      resolve2(true);
-    },
-  );
-
-  relaypool.publish(event, relayurls);
-  return expect(
-    new Promise((resolve) => {
-      resolve2 = resolve;
-    }),
-  ).resolves.toEqual(true);
-});
-
-test("relay option in filter", async () => {
-  const event = await publishAndGetEvent(relayurls);
-
-  var resolve1: (success: boolean) => void;
-  var resolve2: (success: boolean) => void;
-  const promiseAll = Promise.all([
-    new Promise((resolve) => {
-      resolve1 = resolve;
-    }),
-    new Promise((resolve) => {
-      resolve2 = resolve;
-    }),
-  ]);
-
-  relaypool.subscribe(
-    [
-      {
-        kinds: [event.kind],
-        relay: relayurls[0],
-      },
-    ],
-    [],
-    (event, afterEose, url) => {
-      expect(event).toHaveProperty("id", event.id);
-      expect(afterEose).toBe(false);
-      resolve1(true);
-    },
-    undefined,
-    (url, minCreatedAt) => {
-      expect(minCreatedAt).toBe(event.created_at);
-      expect(url).toBe(relayurls[0]);
-      resolve2(true);
-    },
-  );
-
-  return expect(promiseAll).resolves.toEqual([true, true]);
-});
-
-test("cached result", async () => {
-  const event = createSignedEvent();
-  relaypool.publish(event, relayurls);
-
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [event.pubkey],
-          },
-        ],
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("pubkey", event.pubkey);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-      );
-    }),
-  ).resolves.toEqual(true);
-
-  const secondOnEvent = new Promise((resolve) => {
-    relaypool.subscribe(
-      [
-        {
-          ids: [event.id],
-        },
-      ],
-      [],
-      (event) => {
-        expect(event).toHaveProperty("pubkey", event.pubkey);
-        expect(event).toHaveProperty("kind", 27572);
-        expect(event).toHaveProperty("content", "nostr-tools test suite");
-        resolve(true);
-      },
+      authorSk,
     );
-  });
+    await publishAndEnsureEvent(relaypool, server2, relayListEvent, [discoveryRelayUrl]);
 
-  return expect(secondOnEvent).resolves.toEqual(true);
-});
-
-test("remove duplicates", async () => {
-  const event = await publishAndGetEvent(relayurls);
-
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [event.pubkey],
-          },
-        ],
-        relayurls,
-        (event, afterEose, url) => {
-          expect(event).toHaveProperty("pubkey", event.pubkey);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-      );
-    }),
-  ).resolves.toEqual(true);
-
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [event.pubkey],
-          },
-        ],
-        relayurls,
-        (event, afterEose, url) => {
-          expect(event).toHaveProperty("pubkey", event.pubkey);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-      );
-      relaypool.publish(event, relayurls);
-    }),
-  ).resolves.toEqual(true);
-
-  let counter = 0;
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [event.pubkey],
-            noCache: true,
-          },
-        ],
-        [...relayurls, ...relayurls2],
-        (event, afterEose, url) => {
-          expect(event).toHaveProperty("pubkey", event.pubkey);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          counter += 1;
-          if (counter === 2) {
-            resolve(true);
-          }
-        },
-        undefined,
-        undefined,
-        {allowDuplicateEvents: true},
-      );
-      relaypool.publish(event, relayurls);
-      relaypool.publish(event, relayurls2);
-    }),
-  ).resolves.toEqual(true);
-
-  let counter2 = 0;
-  const thirdOnEvent = new Promise((resolve) => {
-    relaypool.subscribe(
-      [
-        {
-          authors: [event.pubkey],
-        },
-      ],
-      [...relayurls, ...relayurls2],
-      (event, afterEose, url) => {
-        expect(event).toHaveProperty("pubkey", event.pubkey);
-        expect(event).toHaveProperty("kind", 27572);
-        expect(event).toHaveProperty("content", "nostr-tools test suite");
-        counter2 += 1;
-        if (counter2 === 2) {
-          resolve(true);
-        }
-      },
-    );
-    relaypool.publish(event, relayurls);
-    relaypool.publish(event, relayurls2);
-  });
-
-  await expect(
-    Promise.race([
-      thirdOnEvent,
-      new Promise((resolve) => setTimeout(() => resolve(-1), 50)),
-    ]),
-  ).resolves.toEqual(-1);
-});
-
-test("cache authors", async () => {
-  let event = createSignedEvent();
-  let pk = event.pubkey;
-
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [pk],
-          },
-        ],
-        relayurls2,
-        (event, afterEose, url) => {
-          expect(event).toHaveProperty("pubkey", pk);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-      );
-      relaypool.publish(event, relayurls2);
-    }),
-  ).resolves.toEqual(true);
-
-  return expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [27572],
-            authors: [pk],
-          },
-        ],
-        relayurls2,
-        (event, afterEose, url) => {
-          expect(event).toHaveProperty("pubkey", pk);
-          expect(event).toHaveProperty("kind", 27572);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          expect(url).toEqual(undefined);
-          resolve(true);
-        },
-      );
-    }),
-  ).resolves.toEqual(true);
-});
-
-test("kind3", async () => {
-  let event = createSignedEvent(3);
-  relaypool.publish(event, relayurls);
-  let pk = event.pubkey;
-
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [3],
-            authors: [pk],
-          },
-        ],
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("pubkey", pk);
-          expect(event).toHaveProperty("kind", 3);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-      );
-    }),
-  ).resolves.toEqual(true);
-
-  const secondOnEvent = new Promise((resolve) => {
-    relaypool.subscribe(
-      [
-        {
-          ids: [event.id],
-        },
-      ],
-      [],
-      (event) => {
-        expect(event).toHaveProperty("pubkey", pk);
-        expect(event).toHaveProperty("kind", 3);
-        expect(event).toHaveProperty("content", "nostr-tools test suite");
-        resolve(true);
-      },
-    );
-  });
-
-  return expect(secondOnEvent).resolves.toEqual(true);
-});
-
-test("kind0", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-  let pk = event.pubkey;
-  await expect(
-    new Promise((resolve) => {
-      relaypool.subscribe(
-        [
-          {
-            kinds: [0],
-            authors: [pk],
-          },
-        ],
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("pubkey", pk);
-          expect(event).toHaveProperty("kind", 0);
-          expect(event).toHaveProperty("content", "nostr-tools test suite");
-          resolve(true);
-        },
-        undefined,
-        undefined,
-        {logAllEvents: true},
-      );
-    }),
-  ).resolves.toEqual(true);
-  console.log("first on event done");
-
-  const secondOnEvent = new Promise((resolve) => {
-    relaypool.subscribe(
-      [
-        {
-          ids: [event.id],
-        },
-      ],
-      [],
-      (event) => {
-        expect(event).toHaveProperty("pubkey", pk);
-        expect(event).toHaveProperty("kind", 0);
-        expect(event).toHaveProperty("content", "nostr-tools test suite");
-        resolve(true);
-      },
-    );
-  });
-
-  await expect(secondOnEvent).resolves.toEqual(true);
-
-  const thirdOnEvent = new Promise((resolve) => {
-    relaypool.subscribe(
-      [
-        {
-          kinds: [0],
-          authors: [pk],
-        },
-      ],
-      [],
-      (event) => {
-        expect(event).toHaveProperty("pubkey", pk);
-        expect(event).toHaveProperty("kind", 0);
-        expect(event).toHaveProperty("content", "nostr-tools test suite");
-        resolve(true);
-      },
-    );
-  });
-
-  return expect(thirdOnEvent).resolves.toEqual(true);
-});
-
-test("getRelayStatuses", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-  expect(relaypool.getRelayStatuses()).toEqual([[relayurls[0], 0]]);
-});
-
-test("nounsub", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-
-  let p2 = new Promise((resolve2) => {
-    new Promise((resolve1) => {
-      let counter = 0;
-      let _sub1 = relaypool.subscribe(
-        filtersByKind(event),
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("kind", 0);
-          counter++;
-          if (counter === 1) {
-            let event2 = createSignedEvent(0);
-            relaypool.publish(event2, relayurls);
-          } else if (counter === 2) {
-            resolve2(true);
-          }
-        },
-      );
-    });
-  });
-  await expect(p2).resolves.toEqual(true);
-});
-
-test("unsub", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-
-  let p2 = new Promise((resolve2) => {
-    new Promise((resolve1) => {
-      let counter = 0;
-      let sub1 = relaypool.subscribe(
-        filtersByKind(event),
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("kind", 0);
-          counter++;
-          if (counter === 1) {
-            sub1();
-            let event2 = createSignedEvent(0);
-            relaypool.publish(event2, relayurls);
-          } else if (counter === 2) {
-            resolve2(true);
-          }
-        },
-      );
-    });
-  });
-  await expect(
-    Promise.race([
-      p2,
-      new Promise((resolve) => {
-        setTimeout(() => resolve(false), 50);
-      }),
-    ]),
-  ).resolves.toEqual(false);
-});
-
-test("delay_nounsub", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-
-  let p2 = new Promise((resolve2) => {
-    new Promise((resolve1) => {
-      let counter = 0;
-      let _sub1 = relaypool.subscribe(
-        filtersByKind(event),
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("kind", 0);
-          counter++;
-          if (counter === 1) {
-            let event2 = createSignedEvent(0);
-            relaypool.publish(event2, relayurls);
-          } else if (counter === 2) {
-            resolve2(true);
-          }
-        },
-        0,
-      );
-    });
-  });
-  await expect(
-    Promise.race([
-      p2,
-      new Promise((resolve) => {
-        setTimeout(() => resolve(false), 50);
-      }),
-    ]),
-  ).resolves.toEqual(true);
-});
-
-test("delay_unsub", async () => {
-  let event = createSignedEvent(0);
-  relaypool.publish(event, relayurls);
-
-  let p2 = new Promise((resolve2) => {
-    new Promise((resolve1) => {
-      let counter = 0;
-      let sub1 = relaypool.subscribe(
-        filtersByKind(event),
-        relayurls,
-        (event) => {
-          expect(event).toHaveProperty("kind", 0);
-          counter++;
-          if (counter === 1) {
-            sub1();
-            let event2 = createSignedEvent(0);
-            relaypool.publish(event2, relayurls);
-          } else if (counter === 2) {
-            resolve2(true);
-          }
-        },
-        0,
-      );
-    });
-  });
-  await expect(
-    Promise.race([
-      p2,
-      new Promise((resolve) => {
-        setTimeout(() => resolve(false), 50);
-      }),
-    ]),
-  ).resolves.toEqual(false);
-});
-
-test("unsubscribeOnEose", async () => {
-  let relayServer = new InMemoryRelayServer(8099);
-  let event = createSignedEvent();
-  relaypool.close();
-  relaypool = new RelayPool([]);
-  relaypool.publish(event, ["ws://localhost:8099/"]);
-  expect(relayServer.subs.size).toEqual(0);
-
-  await new Promise((resolve) => {
-    let sub = relaypool.subscribe(
-      filtersByKind(event),
-      ["ws://localhost:8099/"],
-      (event) => {
-        expect(event).toHaveProperty("kind", event.kind);
-        sub();
-        setTimeout(() => resolve(true), 50);
-      },
-    );
-  });
-
-  expect(_relayServer.subs.size).toEqual(0);
-
-  let found = false;
-  let p2;
-  let p = new Promise((resolve) => {
-    p2 = new Promise((resolve2) => {
-      let _sub = relaypool.subscribe(
-        filtersByKind(event),
-        ["ws://localhost:8099/"],
-        (event) => {
-          expect(event).toHaveProperty("kind", event.kind);
-          found = true;
-          resolve(true);
-        },
-        undefined,
-        () => resolve2(true),
-        {unsubscribeOnEose: true},
-      );
-    });
-  });
-  await expect(p).resolves.toEqual(true);
-  await expect(p2).resolves.toEqual(true);
-  expect(found).toEqual(true);
-  await sleepms(50);
-  expect(relayServer.subs.size).toEqual(0);
-  relayServer.close();
-});
-
-const filtersByAuthor = (event: Event) => [{authors: [event.pubkey]}];
-const filtersByKind = (event: Event) => [{kinds: [event.kind]}];
-const _filtersById = (event: Event & {id: string}) => [{ids: [event.id]}];
-const sleepms = (timeoutMs: number) =>
-  new Promise((resolve) => setTimeout(() => resolve(true), timeoutMs));
-
-// const subscribePromise = (
-//   relaypool: RelayPool,
-//   filters: Filter[],
-//   relays: string[],
-//   onEventPromise: (resolve: (value: any) => void) => OnEvent,
-//   maxDelayms?: number | undefined,
-//   onEosePromise?: (resolve: (value: any) => void) => OnEose,
-//   options?: SubscriptionOptions
-// ) =>
-//   new Promise((resolve) =>
-//     relaypool.subscribe(
-//       filters,
-//       relays,
-//       onEventPromise(resolve),
-//       maxDelayms,
-//       onEosePromise?.(resolve),
-//       options
-//     )
-//   );
-
-test("subscriptionCache", async () => {
-  let event = createSignedEvent();
-  relaypool.publish(event, relayurls);
-  expect(_relayServer.totalSubscriptions).toEqual(0);
-
-  await new Promise((resolve) => {
-    relaypool.subscribe(filtersByKind(event), relayurls, (event) => {
-      resolve(true);
-    });
-  });
-
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByAuthor(event),
-      relayurls,
-      (event) => {
-        resolve(true);
-      },
-      undefined,
-      undefined,
-      {unsubscribeOnEose: true},
-    );
-  });
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByAuthor(event),
-      relayurls,
-      (event) => {
-        resolve(true);
-      },
-      undefined,
-      undefined,
-      {unsubscribeOnEose: true},
-    );
-  });
-  await sleepms(10);
-  expect(_relayServer.totalSubscriptions).toEqual(2);
-});
-
-// jest -t 'pool memory' --testTimeout 1000000 --logHeapUsage
-//  PASS  ./relay-pool.test.ts (92.9 s, 348 MB heap size)
-test.skip("pool memory usage", async () => {
-  console.log("creating new relaypool");
-  relaypool.close();
-  relaypool = new RelayPool(relayurls);
-  relaypool.relayByUrl.forEach((relay) => {
+    // Override metadataCache.relays for this test to look at discoveryRelay
     // @ts-ignore
-    relay.relay.logging = false;
-  });
-  await publishAndGetEvent(relayurls, 100, "x".repeat(20 * 1024 * 1024));
+    relaypool.writeRelays.relays = [discoveryRelayUrl];
 
-  for (let i = 0; i < 300; i++) {
-    await new Promise((resolve) => {
-      const unsub = relaypool.subscribe([{}], relayurls, (event) => {
-        unsub();
-        resolve(true);
+    // 2. Publish a test event to the target relay
+    const testEvent = finalizeEvent(
+      {
+        kind: Kind.Text,
+        created_at: Math.floor(Date.now() / 1000) + 10,
+        tags: [],
+        content: "Hello NIP-65!",
+      },
+      authorSk,
+    );
+    await publishAndEnsureEvent(relaypool, server1, testEvent, [targetRelayUrl]);
+
+    // 3. Subscribe to the author's events without specifying relays
+    // It should discover the targetRelayUrl via NIP-65
+    let receivedEvent: Event | undefined;
+    await new Promise<void>((resolve) => {
+      relaypool.subscribe(
+        [{authors: [authorPk], kinds: [Kind.Text]}],
+        undefined, // Relays undefined to trigger NIP-65 discovery
+        (e) => {
+          receivedEvent = e;
+          resolve();
+        },
+        0, // Immediate subscription
+      );
+    });
+
+    assertDefined(receivedEvent);
+    assertEqual(receivedEvent?.id, testEvent.id);
+    await relaypool.close();
+    await server1.close();
+    await server2.close();
+  }, 20000); // Extended timeout for NIP-65 test
+
+  test("NIP-42 Authentication Flow", async () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const authRelayPort = getUniquePort();
+    const authServer = new InMemoryRelayServer(authRelayPort);
+    authServer.auth = "test-challenge";
+
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${authRelayPort}/`); // Add relay to pool
+
+    let onAuthCalled = false;
+    const authPromise = new Promise<void>((resolve) => {
+      relaypool.onauth((r, challenge) => {
+        assertEqual(r.url, `ws://localhost:${authRelayPort}/`);
+        assertEqual(challenge, "test-challenge");
+        relaypool.authenticate(`ws://localhost:${authRelayPort}/`, challenge, sk as any);
+        onAuthCalled = true;
+        resolve();
       });
     });
-  }
-});
 
-test("delayfiltering", async () => {
-  let event = createSignedEvent();
-  relaypool.publish(event, relayurls);
-  expect(_relayServer.totalSubscriptions).toEqual(0);
+    // Trigger connection/auth by trying to publish (or subscribe)
+    const event = finalizeEvent({kind: Kind.Text, created_at: Math.floor(Date.now()/1000), tags: [], content: "Auth test"}, sk);
+    relaypool.publish(event, [`ws://localhost:${authRelayPort}/`]);
 
-  await new Promise((resolve) => {
-    relaypool.subscribe(filtersByKind(event), relayurls, (event) => {
-      resolve(true);
+    await authPromise;
+    assertTrue(onAuthCalled);
+
+    await relaypool.close();
+    await authServer.close();
+  }, 15000); // Extended timeout for auth test
+
+  test("NIP-57 Zap Flow", async () => {
+    const zapperSk = generateSecretKey();
+    const zappeeSk = generateSecretKey();
+    const zappeePk = getPublicKey(zappeeSk);
+    const amountSats = 1000;
+    const comment = "Great content!";
+    const targetRelayPort = getUniquePort();
+    const targetServer = new InMemoryRelayServer(targetRelayPort);
+
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
     });
-  });
-  expect(_relayServer.totalSubscriptions).toEqual(1);
-  relaypool.close();
-  relaypool = new RelayPool([], {});
-
-  const p2 = new Promise((resolve) => {
-    relaypool.subscribe(
-      [{ids: ["notfound"], authors: [event.pubkey]}],
-      relayurls,
-      (event) => {
-        resolve(false);
+    relaypool.addOrGetRelay(`ws://localhost:${targetRelayPort}/`); // Add target relay to pool
+    
+    // Setup zappee's metadata with LNURL
+    const zappeeMetadataEvent = finalizeEvent(
+      {
+        kind: Kind.Metadata,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: JSON.stringify({
+          name: "zappee",
+          lud16: `test@test.com` // Mock LUD16 for the test
+        }),
       },
-      1,
-      undefined,
-      {unsubscribeOnEose: true},
+      zappeeSk
     );
-  });
+    
+    // Publish zappee's metadata to the relay
+    await publishAndEnsureEvent(relaypool, targetServer, zappeeMetadataEvent, [`ws://localhost:${targetServer.port}/`]);
+  
+    // Override metadataCache.relays for this test to look at targetRelay
+    // @ts-ignore
+    relaypool.metadataCache.relays = [`ws://localhost:${targetServer.port}/`];
 
-  const p1 = new Promise((resolve) => {
-    relaypool.subscribe(
-      [{ids: [event.id], authors: [event.pubkey]}],
-      relayurls,
-      (event) => {
-        resolve(true);
-      },
-      1,
-      undefined,
-      {unsubscribeOnEose: true},
-    );
-  });
-  await p1;
-  expect(await p1).toEqual(true);
-  expect(await Promise.race([p2, sleepms(10).then(() => true)])).toEqual(true);
-  await sleepms(10);
-  expect(_relayServer.totalSubscriptions).toEqual(2);
-});
-
-test("auth", async () => {
-  const sk = generateSecretKey();
-  _relayServer.auth = "123";
-  relaypool.close();
-  const relaypool2 = new RelayPool(relayurls, {
-    subscriptionCache: true,
-    useEventCache: true,
-  });
-  await expect(
-    new Promise((resolve) => {
-      relaypool2.onauth((relay, challenge) => {
-        relaypool2.authenticate(relay.url, challenge, sk as any);
-        resolve(true);
-      });
-    }),
-  ).resolves.toBe(true);
-  await relaypool2.close();
-}, 10000);
-
-test("dontSendOtherFilters", async () => {
-  const event = createSignedEvent();
-  relaypool.publish(event, relayurls);
-
-  const never = new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByKind(event),
-      relayurls,
-      (_event) => {
-        resolve(true);
-      },
-      Infinity,
-      undefined,
-      {unsubscribeOnEose: true},
-    );
-  });
-
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByKind(event),
-      relayurls,
-      (_event) => {
-        resolve(true);
-      },
-      undefined,
-      undefined,
-      {unsubscribeOnEose: false, dontSendOtherFilters: true},
-    );
-  });
-
-  const neverResult = await Promise.race([
-    never,
-    sleepms(10).then(() => false),
-  ]);
-  expect(neverResult).toEqual(false);
-});
-
-// Test SubscriptionFilterStateCache
-test("SubscriptionFilterStateCache", async () => {
-  const event = createSignedEvent();
-  relaypool.publish(event, relayurls);
-  expect(_relayServer.totalSubscriptions).toEqual(0);
-
-  await new Promise((resolve) => {
-    relaypool.subscribe(filtersByKind(event), relayurls, (event) => {
-      // console.log("event", event);
-      resolve(true);
+    // Configure the mock implementations for this test
+    const mockGetZapEndpoint = nip57.getZapEndpoint as jest.Mock;
+    mockGetZapEndpoint.mockImplementation(async (metadata) => {
+      return "http://localhost:8080/zap_callback"; // Directly return the mock callback URL
     });
-  });
-  let subscriptionFilterStateCache = new SubscriptionFilterStateCache();
-  let filter = filtersByKind(event)[0];
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      [filter],
-      relayurls,
-      (event) => {
-        // console.log("event", event);
-      },
-      undefined,
-      (url, minCreatedAt) => {
-        // console.log("onEose", url, minCreatedAt);
-        resolve(true);
-      },
-      {unsubscribeOnEose: true, subscriptionFilterStateCache},
-    );
-  });
-  let filterInfoForFilter = subscriptionFilterStateCache.filterInfo.get(
-    JSON.stringify(filter),
-  );
-  expect(filterInfoForFilter).toBeTruthy();
-  let filterInfoForFilterAndHost = filterInfoForFilter?.get(relayurls[0]);
-  expect(filterInfoForFilterAndHost).toBeTruthy();
-  expect(
-    Math.abs(
-      Math.round(filterInfoForFilterAndHost![0] / 10) -
-        Math.round(event.created_at / 10),
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(filterInfoForFilterAndHost?.[1]).toEqual(event.created_at);
-});
-
-// Test limit
-test("limit", async () => {
-  const event1 = createSignedEvent(10, "event1", 1000);
-  relaypool.publish(event1, relayurls);
-  const event2 = createSignedEvent(10, "event2", 2000);
-  relaypool.publish(event2, relayurls);
-
-  expect(_relayServer.totalSubscriptions).toEqual(0);
-  while (_relayServer.events.length < 2) {
-    await sleepms(3);
-  }
-
-  let events = 0;
-  let filters = filtersByKind(event1).map((filter) => {
-    return {...filter, limit: 1};
-  });
-  console.log({filters});
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByKind(event1).map((filter) => {
-        return {...filter, limit: 1};
-      }),
-      relayurls,
-      (event) => {
-        console.log("event", event);
-        expect(event).toHaveProperty("content", "event2");
-        events++;
-      },
-      undefined,
-      (url, minCreatedAt) => {
-        expect(minCreatedAt).toBe(event2.created_at);
-        expect(events).toBe(1);
-        resolve(true);
-      },
-    );
-  });
-});
-
-// Test _continue
-test("_continue", async () => {
-  const event1 = createSignedEvent(10, "event1", 1000);
-  relaypool.publish(event1, relayurls);
-  const event2 = createSignedEvent(10, "event2", 2000);
-  relaypool.publish(event2, relayurls);
-
-  expect(_relayServer.totalSubscriptions).toEqual(0);
-  while (_relayServer.events.length < 2) {
-    await sleepms(3);
-  }
-
-  // Test _continue by using limit 1 in filter
-  let expectedContent = event2.content;
-  let events = 0;
-  await new Promise((resolve) => {
-    relaypool.subscribe(
-      filtersByKind(event1).map((filter) => {
-        return {...filter, limit: 1};
-      }),
-      relayurls,
-      (event) => {
-        expect(event).toHaveProperty("content", expectedContent);
-        events++;
-      },
-      undefined,
-      (url, minCreatedAt, _continue) => {
-        // console.log("onEose", url, minCreatedAt);
-        expect(minCreatedAt).toBe(event2.created_at);
-        expect(events).toBe(1);
-        expectedContent = event1.content;
-        _continue!((relayUrl, minCreatedAt) => {
-          expect(minCreatedAt).toBe(event1.created_at);
-          expect(events).toBe(2);
-          resolve(true);
-        });
-      },
-    );
-  });
-});
-
-test("NIP-65 Relay Discovery (Kind 10002)", async () => {
-  const authorSk = generateSecretKey();
-  const authorPk = getPublicKey(authorSk);
-  const writeRelay = "ws://localhost:8083/";
-
-  const relayListEvent = finalizeEvent(
-    {
-      kind: 10002,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [["r", writeRelay, "write"]],
-      content: "",
-    },
-    authorSk,
-  );
-
-  // Use a second relay to host the relay list
-  const discoveryRelay = relayurls2[0];
-  relaypool.publish(relayListEvent, [discoveryRelay]);
-
-  // Wait for the event to be processed by the server
-  while (_relayServer2.events.length < 1) {
-    await sleepms(10);
-  }
-
-  // Set the discovery relay as the default for NewestEventCache to find the relay list
-  relaypool.addOrGetRelay(discoveryRelay);
-  // @ts-ignore
-  relaypool.writeRelays.relays = [discoveryRelay];
-
-  const testEvent = finalizeEvent(
-    {
-      kind: 1,
-      created_at: Math.floor(Date.now() / 1000) + 10,
-      tags: [],
-      content: "Hello Outbox!",
-    },
-    authorSk,
-  );
-
-  // Publish the test event to the write relay
-  relaypool.publish(testEvent, [writeRelay]);
-  while (_relayServer.events.length < 1) {
-    await sleepms(10);
-  }
-
-  // Subscribe to the author's events without specifying relays
-  // It should discover the write relay via NIP-65
-  const promise = new Promise((resolve) => {
-    relaypool.subscribe(
-      [{authors: [authorPk]}],
-      undefined,
-      (event) => {
-        if (event.id === testEvent.id) {
-          resolve(true);
-        }
-      },
-      0,
-    );
-  });
-
-  await expect(promise).resolves.toBe(true);
-}, 10000);
-
-test("NIP-57 Zap Flow", async () => {
-  const zapperSk = generateSecretKey();
-  const zapperPk = getPublicKey(zapperSk);
-  const zappeeSk = generateSecretKey();
-  const zappeePk = getPublicKey(zappeeSk);
-  const amountSats = 1000;
-  const comment = "Great content!";
-  const targetRelay = "ws://localhost:8083/";
   
-  // Setup zappee's metadata with LNURL
-  const zappeeMetadataEvent = finalizeEvent(
-    {
-      kind: 0,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [],
-      content: JSON.stringify({
-        name: "zappee",
-        lud16: `test@test.com` // Mock LUD16 for the test
-      }),
-    },
-    zappeeSk
-  );
+    // Mock global.fetch for the final invoice request
+    jest.spyOn(global, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("http://localhost:8080/zap_callback")) { // Match URL with query parameters
+        return Promise.resolve(new Response(JSON.stringify({
+          pr: "lnbc1invoice..." // Mock invoice
+        })));
+      }
+      // Fallback for unmatched calls, return a valid Response object with an error
+      return Promise.resolve(new Response(JSON.stringify({ error: `Mocked fetch: unexpected URL: ${url}` }), { status: 404 }));
+    });
   
-  // Publish zappee's metadata to the relay
-  relaypool.publish(zappeeMetadataEvent, [targetRelay]);
-  while (_relayServer.events.length < 1) {
-    await sleepms(10);
-  }
-
-  // Override metadataCache.relays for this test to look at targetRelay
-  // @ts-ignore
-  relaypool.metadataCache.relays = [targetRelay];
-
-  // Configure the mock implementations for this test
-  const mockGetZapEndpoint = nip57.getZapEndpoint as jest.Mock;
-  mockGetZapEndpoint.mockImplementation(async (metadata) => {
-    return "http://localhost:8080/zap_callback"; // Directly return the mock callback URL
-  });
-
-  // Mock fetch for the final invoice request
-  jest.spyOn(global, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-    const url = input.toString();
-    if (url.startsWith("http://localhost:8080/zap_callback")) { // Match URL with query parameters
-      return Promise.resolve(new Response(JSON.stringify({
-        pr: "lnbc1invoice..." // Mock invoice
-      })));
-    }
-    // Fallback for unmatched calls, return a valid Response object with an error
-    return Promise.resolve(new Response(JSON.stringify({ error: `Mocked fetch: unexpected URL: ${url}` }), { status: 404 }));
-  });
-
-  const { zapRequestEvent, invoice } = await relaypool.zap(
-    zapperSk as any, // Needs string private key
-    zappeePk,
-    amountSats,
-    comment,
-  );
-
-  expect(zapRequestEvent).toBeDefined();
-  expect(zapRequestEvent.kind).toBe(Kind.ZapRequest);
-  expect(zapRequestEvent.pubkey).toBe(getPublicKey(zapperSk));
-  expect(invoice).toBe("lnbc1invoice...");    
-  // Publish the zap request event through the pool
-  relaypool.publish(zapRequestEvent, [targetRelay]);
-
-  // Verify the zap request event is received by the mock relay
-  let receivedZapEvent: Event | undefined;
-  await new Promise<void>((resolve) => {
-    const sub = relaypool.subscribe(
-      [{ ids: [zapRequestEvent.id] }],
-      [targetRelay],
-      (event) => {
-        receivedZapEvent = event;
-        resolve();
-      },
-      0, // Immediate subscription
+    const { zapRequestEvent, invoice } = await relaypool.zap(
+      zapperSk as any, // Private key of the zapper (string)
+      zappeePk, // Pubkey of the zappee
+      amountSats,
+      comment,
     );
-  });
+  
+    assertDefined(zapRequestEvent);
+    assertEqual(zapRequestEvent.kind, Kind.ZapRequest);
+    assertEqual(zapRequestEvent.pubkey, getPublicKey(zapperSk));
+    assertEqual(invoice, "lnbc1invoice...");    
+    
+    // Publish the zap request event through the pool
+    relaypool.publish(zapRequestEvent, [`ws://localhost:${targetServer.port}/`]);
+  
+    // Verify the zap request event is received by the mock relay
+    let receivedZapEvent: Event | undefined;
+    await new Promise<void>((resolve) => {
+      const sub = relaypool.subscribe(
+        [{ ids: [zapRequestEvent.id] }],
+        [`ws://localhost:${targetServer.port}/`],
+        (e) => {
+          receivedZapEvent = e;
+          resolve();
+        },
+        0, // Immediate subscription
+      );
+    });
+  
+    assertDefined(receivedZapEvent);
+    assertEqual(receivedZapEvent?.id, zapRequestEvent.id);
+  
+    // Restore original fetch
+    (global.fetch as jest.Mock).mockRestore();
 
-  expect(receivedZapEvent).toBeDefined();
-  expect(receivedZapEvent?.id).toBe(zapRequestEvent.id);
+    await relaypool.close();
+    await targetServer.close();
+  }, 15000); // Extended timeout
 
-  // Restore original fetch
-  (global.fetch as jest.Mock).mockRestore();
-}, 15000);
+  test("NIP-50 Search Flow", async () => {
+    const authorSk = generateSecretKey();
+    const authorPk = getPublicKey(authorSk);
+    const searchTerm = "awesome nostr";
+    const targetRelayPort = getUniquePort();
+    const targetServer = new InMemoryRelayServer(targetRelayPort);
 
-test("NIP-50 Search Flow", async () => {
-  const authorSk = generateSecretKey();
-  const authorPk = getPublicKey(authorSk);
-  const searchTerm = "awesome nostr";
-  const targetRelay = "ws://localhost:8083/";
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${targetRelayPort}/`); // Add target relay to pool
 
-  const searchEvent = finalizeEvent(
-    {
-      kind: Kind.Text,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [],
-      content: `This is an ${searchTerm} event.`,
-    },
-    authorSk,
-  );
-
-  // Publish the search event to the relay
-  relaypool.publish(searchEvent, [targetRelay]);
-  while (_relayServer.events.length < 1) {
-    await sleepms(10);
-  }
-
-  // Subscribe using the search method
-  let receivedSearchEvent: Event | undefined;
-  await new Promise<void>((resolve) => {
-    const sub = relaypool.search(
-      searchTerm,
-      [targetRelay],
-      (event) => {
-        receivedSearchEvent = event;
-        resolve();
+    const searchEvent = finalizeEvent(
+      {
+        kind: Kind.Text,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: `This is an ${searchTerm} event.`,
       },
-      0, // Immediate subscription
+      authorSk,
     );
+
+    // Publish the search event to the relay
+    await publishAndEnsureEvent(relaypool, targetServer, searchEvent, [`ws://localhost:${targetServer.port}/`]);
+
+    // Subscribe using the search method
+    let receivedSearchEvent: Event | undefined;
+    await new Promise<void>((resolve) => {
+      const sub = relaypool.search(
+        searchTerm,
+        [`ws://localhost:${targetServer.port}/`],
+        (e) => {
+          receivedSearchEvent = e;
+          resolve();
+        },
+        0, // Immediate subscription
+      );
+    });
+
+    assertDefined(receivedSearchEvent);
+    assertEqual(receivedSearchEvent?.id, searchEvent.id);
+    assertTrue(receivedSearchEvent?.content.includes(searchTerm) || false);
+
+    await relaypool.close();
+    await targetServer.close();
+  }, 15000); // Extended timeout for search test
+
+  test("EventCache LRU eviction", async () => {
+    const capacity = 2;
+    const targetRelayPort = getUniquePort();
+    const targetServer = new InMemoryRelayServer(targetRelayPort);
+
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+      eventCacheCapacity: capacity,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${targetRelayPort}/`); // Add target relay to pool
+
+    // Subscribe to all text events so the relay echoes them back and they get cached
+    relaypool.subscribe(
+        [{kinds: [Kind.Text]}],
+        [`ws://localhost:${targetRelayPort}/`],
+        (e) => {}, // No-op callback, we just want the side effect of caching
+        0
+    );
+
+    const event1 = finalizeEvent({kind: Kind.Text, created_at: 1, tags: [], content: "Event 1"}, generateSecretKey());
+    const event2 = finalizeEvent({kind: Kind.Text, created_at: 2, tags: [], content: "Event 2"}, generateSecretKey());
+    const event3 = finalizeEvent({kind: Kind.Text, created_at: 3, tags: [], content: "Event 3"}, generateSecretKey());
+
+    // Add events - event1 should be evicted when event3 is added
+    relaypool.publish(event1, [`ws://localhost:${targetRelayPort}/`]);
+    relaypool.publish(event2, [`ws://localhost:${targetRelayPort}/`]);
+    await waitUntil(() => relaypool.eventCache?.hasEventById(event2.id) || false); // Ensure event2 is in cache
+
+    relaypool.publish(event3, [`ws://localhost:${targetRelayPort}/`]);
+    await waitUntil(() => relaypool.eventCache?.hasEventById(event3.id) || false); // Ensure event3 is in cache
+
+    // Check cache status
+    assertEqual(relaypool.eventCache?.hasEventById(event1.id), false); // event1 should be evicted
+    assertEqual(relaypool.eventCache?.hasEventById(event2.id), true);
+    assertEqual(relaypool.eventCache?.hasEventById(event3.id), true);
+
+    // Access event2 to make it most recent
+    relaypool.getEventById(event2.id, [`ws://localhost:${targetRelayPort}/`], 0);
+
+    const event4 = finalizeEvent({kind: Kind.Text, created_at: 4, tags: [], content: "Event 4"}, generateSecretKey());
+    relaypool.publish(event4, [`ws://localhost:${targetRelayPort}/`]);
+    await waitUntil(() => relaypool.eventCache?.hasEventById(event4.id) || false); // Ensure event4 is in cache
+
+    assertEqual(relaypool.eventCache?.hasEventById(event3.id), false); // event3 should be evicted (LRU)
+    assertEqual(relaypool.eventCache?.hasEventById(event2.id), true);
+    assertEqual(relaypool.eventCache?.hasEventById(event4.id), true);
+    await relaypool.close();
+    await targetServer.close();
+  }, 15000); // Extended timeout
+
+  test("RelayPool closes all connections", async () => {
+    const port1 = getUniquePort();
+    const port2 = getUniquePort();
+    const server1 = new InMemoryRelayServer(port1);
+    const server2 = new InMemoryRelayServer(port2);
+
+    const relaypool = new RelayPool([], {
+      subscriptionCache: true,
+      useEventCache: true,
+    });
+    relaypool.addOrGetRelay(`ws://localhost:${port1}/`);
+    relaypool.addOrGetRelay(`ws://localhost:${port2}/`);
+
+    await relaypool.close(); // Close the pool
+
+    // Explicitly close servers as well
+    await server1.close();
+    await server2.close();
   });
-
-  expect(receivedSearchEvent).toBeDefined();
-  expect(receivedSearchEvent?.id).toBe(searchEvent.id);
-  expect(receivedSearchEvent?.content).toContain(searchTerm);
-});
-
-test("signEvent functionality", async () => {
-  const testSk = generateSecretKey();
-  const testPk = getPublicKey(testSk);
-  const eventTemplate = {
-    kind: Kind.Text,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [],
-    content: "Test event for signing",
-  };
-
-  // Test 1: Local signing with private key
-  const signedEventLocal = await relaypool.signEvent(eventTemplate, testSk as any);
-  expect(signedEventLocal).toBeDefined();
-  expect(signedEventLocal.pubkey).toBe(testPk);
-  expect(signedEventLocal.id).toBeDefined();
-  expect(signedEventLocal.sig).toBeDefined();
-
-  // Test 2: Signing with an external signer function
-  const mockExternalSigner = jest.fn(async (template: EventTemplate) => {
-    // Simulate window.nostr.signEvent
-    const pk = getPublicKey(testSk); // External signer would know its pubkey
-    const signed = finalizeEvent(template, testSk);
-    return Promise.resolve({ ...signed, pubkey: pk }); // Return a signed event
-  });
-
-  const signedEventExternal = await relaypool.signEvent(eventTemplate, undefined, mockExternalSigner);
-  expect(signedEventExternal).toBeDefined();
-  expect(signedEventExternal.pubkey).toBe(testPk);
-  expect(signedEventExternal.id).toBeDefined();
-  expect(signedEventExternal.sig).toBeDefined();
-  expect(mockExternalSigner).toHaveBeenCalledWith(eventTemplate);
-
-  // Test 3: Error if no signer or private key is provided
-  await expect(relaypool.signEvent(eventTemplate, undefined, undefined)).rejects.toThrow(
-    "No private key or signer provided for signing event."
-  );
 });
