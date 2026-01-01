@@ -1,7 +1,11 @@
 import { RelayPool } from "./index.ts";
+import { InMemoryRelayServer } from "./in-memory-relay-server.ts";
 
 // --- Configuration ---
+const LOCAL_PORT = 8081;
+const LOCAL_RELAY_URL = `ws://localhost:${LOCAL_PORT}`;
 const RELAYS = [
+    LOCAL_RELAY_URL,
     "wss://relay.damus.io",
     "wss://nos.lol",
 ];
@@ -11,6 +15,20 @@ const REFRESH_RATE_MS = 200;
 let eventCount = 0;
 const logs: string[] = [];
 const relayStatuses = new Map<string, string>();
+const relayInstances = new Map<string, any>();
+
+// --- Initialization ---
+
+// Disable internal logging to keep console clean
+const pool = new RelayPool(undefined, {
+    logSubscriptions: false,
+    logErrorsAndNotices: false,
+    useEventCache: true,
+});
+
+// --- Start Local Relay ---
+const localServer = new InMemoryRelayServer(LOCAL_PORT);
+logWarning(`Local Relay Server started on port ${LOCAL_PORT}`);
 
 // --- Logging Helper ---
 function logError(msg: string) {
@@ -29,15 +47,7 @@ function logWarning(msg: string) {
 
 // --- Initialization ---
 
-// Disable internal logging to keep console clean
-const pool = new RelayPool(undefined, {
-    logSubscriptions: false,
-    logErrorsAndNotices: false,
-    useEventCache: true,
-});
-
 // Setup Relays
-const relayInstances = new Map<string, any>();
 
 RELAYS.forEach(url => {
     relayStatuses.set(url, "Connecting");
@@ -83,6 +93,8 @@ function drawDashboard() {
     process.stdout.write('\x1b[2J\x1b[0;0H');
 
     console.log("🚀 NostrRelayPool DEV Mode");
+    console.log("========================================");
+    console.log(`🏠 Local Relay: Running on port ${LOCAL_PORT}`);
     console.log("========================================");
     
     // Stats
