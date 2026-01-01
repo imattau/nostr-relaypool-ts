@@ -1,44 +1,116 @@
 import { RelayPool } from "./index.ts";
 
-console.log("\n🚀 Starting NostrRelayPool in DEV mode...\n");
-
-const pool = new RelayPool(undefined, {
-    logSubscriptions: true,
-    logErrorsAndNotices: true,
-});
-
-const relays = [
+// --- Configuration ---
+const RELAYS = [
     "wss://relay.damus.io",
     "wss://nos.lol",
 ];
+const REFRESH_RATE_MS = 200;
 
-console.log("--- 📡 Relay Configuration ---");
-console.log("Target Relays (links to connect to):");
-relays.forEach(r => console.log(` - ${r}`));
-console.log("------------------------------\n");
+// --- State ---
+let eventCount = 0;
+const logs: string[] = [];
+const relayStatuses = new Map<string, string>();
 
-relays.forEach(url => {
+// --- Logging Helper ---
+function logError(msg: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    logs.push(`[${timestamp}] ❌ ${msg}`);
+    if (logs.length > 5) logs.shift();
+    drawDashboard();
+}
+
+function logWarning(msg: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    logs.push(`[${timestamp}] ⚠️ ${msg}`);
+    if (logs.length > 5) logs.shift();
+    drawDashboard();
+}
+
+// --- Dashboard ---
+function drawDashboard() {
+    // Clear screen and move to top-left
+    process.stdout.write('\x1b[2J\x1b[0;0H');
+
+    console.log("🚀 NostrRelayPool DEV Mode");
+    console.log("========================================");
+    
+    // Stats
+    const cacheSize = pool.eventCache?.eventsById.size || 0;
+    // @ts-ignore - Accessing internal capacity if available, or just showing size
+    const capacity = pool.eventCache?.capacity || "unknown";
+    console.log(`📊 Events Received: ${eventCount}  |  💾 Cache Size: ${cacheSize} / ${capacity}`);
+    console.log("----------------------------------------");
+
+    // Relays
+    console.log("📡 Relays:");
+    RELAYS.forEach(url => {
+        const status = relayStatuses.get(url) || "Unknown";
+        let icon = "⚪";
+        if (status === "Connected") icon = "✅";
+        else if (status.startsWith("Error")) icon = "❌";
+        else if (status === "Disconnected") icon = "⚠️";
+        else if (status === "Connecting") icon = "⏳";
+        
+        console.log(` ${icon} ${url} : ${status}`);
+    });
+    console.log("----------------------------------------");
+
+    // Recent Logs
+    console.log("Recent Warnings/Errors:");
+    if (logs.length === 0) {
+        console.log(" (None)");
+    } else {
+        logs.forEach(l => console.log(l));
+    }
+    console.log("========================================");
+    console.log("Press Ctrl+C to exit.");
+}
+
+// --- Initialization ---
+
+// Disable internal logging to keep console clean
+const pool = new RelayPool(undefined, {
+    logSubscriptions: false,
+    logErrorsAndNotices: false,
+    useEventCache: true,
+});
+
+// Setup Relays
+RELAYS.forEach(url => {
+    relayStatuses.set(url, "Connecting");
     const relay = pool.addOrGetRelay(url);
+    
     relay.on("connect", () => {
-        console.log(`✅ Connected to ${url} (ReadyState: ${relay.status})`);
+        relayStatuses.set(url, "Connected");
+        drawDashboard();
     });
     relay.on("error", (err: any) => {
-        console.log(`❌ Error connecting to ${url}: ${err}`);
+        relayStatuses.set(url, `Error`);
+        logError(`${url}: ${err}`);
     });
     relay.on("disconnect", () => {
-        console.log(`⚠️ Disconnected from ${url}`);
+        relayStatuses.set(url, "Disconnected");
+        drawDashboard();
+    });
+    relay.on("notice", (msg: string) => {
+        logWarning(`${url} Notice: ${msg}`);
     });
 });
 
-// Example subscription
-console.log("🔍 Subscribing to recent kind 1 events...");
+// Subscribe
 pool.subscribe(
-    [{ kinds: [1], limit: 5 }],
-    relays,
+    [{ kinds: [1], limit: 20 }],
+    RELAYS,
     (event) => {
-        console.log(`[EVENT] Kind: ${event.kind} | Author: ${event.pubkey.slice(0, 8)}... | Content: ${event.content.slice(0, 50).replace(/\n/g, ' ')}...`);
+        eventCount++;
+        // Don't redraw on every event to avoid flicker, rely on interval
     }
 );
 
-// Keep process alive
-setInterval(() => {}, 10000);
+// Refresh Loop
+setInterval(drawDashboard, REFRESH_RATE_MS);
+
+// Initial Draw
+drawDashboard();
+
