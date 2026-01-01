@@ -14,6 +14,7 @@ import {AsyncMessageQueue} from "./async-message-queue";
 export type Relay = {
   url: string;
   status: number;
+  connectionInfo: string;
   connect: () => Promise<void>;
   close: () => Promise<void>;
   sub: (filters: Filter[], opts?: SubscriptionOptions) => Sub;
@@ -278,6 +279,10 @@ class RelayC {
     return this.wsConnection.isConnected;
   }
 
+  get connectionInfo(): string {
+    return this.wsConnection.connectionInfo;
+  }
+
   async trySend(params: [string, ...any]) {
     const msg = JSON.stringify(params);
 
@@ -352,6 +357,9 @@ class RelayC {
       },
       get status() {
         return this2.status;
+      },
+      get connectionInfo() {
+        return this2.connectionInfo;
       },
       // @ts-ignore
       relay: this2,

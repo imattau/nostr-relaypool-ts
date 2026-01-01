@@ -104,6 +104,15 @@ export class WebSocketConnection {
     return this.ws?.readyState ?? WebSocket.CLOSED;
   }
 
+  public get connectionInfo(): string {
+    // @ts-ignore - Accessing internal _socket for Node.js environments
+    const socket = this.ws?._socket;
+    if (socket && socket.remoteAddress && socket.remotePort) {
+      return `${socket.remoteAddress}:${socket.remotePort}`;
+    }
+    return this.url;
+  }
+
   private handleClose(event: CloseEvent): void {
     // Always resolve the promise if it exists
     this.resolveClose?.();
