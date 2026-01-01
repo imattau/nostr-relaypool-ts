@@ -55,8 +55,11 @@
   },
   "scripts": {
     "build": "node build.js",
+    "build:watch": "node build.js --watch",
     "pretest": "node build.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules npx jest",
+    "test:watch": "NODE_OPTIONS=--experimental-vm-modules npx jest --watchAll",
+    "dev": "NODE_OPTIONS=--experimental-vm-modules npx jest --watchAll",
     "publish": "yarn install && npm run build && npm run test -- --testTimeout 5000 && npm publish",
     "type-check": "tsc"
   }
