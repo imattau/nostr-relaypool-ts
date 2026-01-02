@@ -18,6 +18,7 @@ export class WebSocketConnection {
   private url: string;
   private connectionPromise: Promise<void> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private pendingMessages: string[] = [];
 
   constructor(url: string, autoReconnect: boolean, events: WebSocketEvents) {
     this.url = url;
@@ -54,6 +55,7 @@ export class WebSocketConnection {
       this.ws.onopen = () => {
         this.reconnectTimeout = 0;
         this.events.open();
+        this.flushPendingMessages();
         resolve();
       };
       this.ws.onerror = (e) => {
@@ -89,10 +91,22 @@ export class WebSocketConnection {
   public send(message: string): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(message);
-    } else {
-      // Potentially queue messages if connection is not yet open
-      // For now, we'll assume send is only called when connected, or it's handled upstream
-      console.warn(`Attempted to send message on a non-open WebSocket to ${this.url}`);
+      return;
+    }
+
+    this.pendingMessages.push(message);
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      this.connect().catch(() => {});
+    }
+  }
+
+  private flushPendingMessages(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    while (this.pendingMessages.length) {
+      const msg = this.pendingMessages.shift();
+      if (msg) {
+        this.ws.send(msg);
+      }
     }
   }
 

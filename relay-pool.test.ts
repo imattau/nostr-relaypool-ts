@@ -1,5 +1,7 @@
 /* eslint-env jest */
 
+import {jest} from "@jest/globals";
+
 jest.setTimeout(15000); // Global test timeout
 
 import {
@@ -8,24 +10,30 @@ import {
   finalizeEvent,
   type Event,
 } from "nostr-tools";
-import * as nip57 from "nostr-tools/nip57";
-import {RelayPool} from "./relay-pool";
 import {InMemoryRelayServer} from "./in-memory-relay-server";
 import {SubscriptionFilterStateCache} from "./subscription-filter-state-cache";
 import {createAndConnectRelay, closeRelayAndServer, sleepms, waitUntil, WebSocketStates} from "./test-utils";
 import {Kind} from "./kind";
 import {assertEqual, assertTrue, assertDefined, assertThrows, assertNotEqual, assertGreaterThanOrEqual} from "./assert-utils";
 
-
-// Mock the entire nip57 module to control its exports
-jest.mock('nostr-tools/nip57', () => ({
-  ...jest.requireActual('nostr-tools/nip57'), // Keep original implementations for other exports
-  getZapEndpoint: jest.fn(), // Mock getZapEndpoint initially
-  makeZapRequest: jest.fn(), // Mock makeZapRequest initially
-}));
-
+const mockGetZapEndpoint = jest.fn();
+const mockMakeZapRequest = jest.fn();
+let RelayPool: typeof import("./relay-pool").RelayPool;
 
 describe("RelayPool Advanced Features", () => {
+
+  beforeAll(async () => {
+    await jest.unstable_mockModule("nostr-tools/nip57", async () => {
+      const actual = await jest.requireActual("nostr-tools/nip57");
+      return {
+        ...actual,
+        getZapEndpoint: mockGetZapEndpoint,
+        makeZapRequest: mockMakeZapRequest,
+      };
+    });
+    RelayPool = (await import("./relay-pool")).RelayPool;
+  });
+
   // Helper to get a unique port for each server instance
   function getUniquePort(): number {
     return Math.floor(Math.random() * 1000) + 8100; // Ports from 8100-9099
@@ -33,7 +41,7 @@ describe("RelayPool Advanced Features", () => {
 
 
   // Mock makeZapRequest to return a simple event template
-  (nip57.makeZapRequest as jest.Mock).mockImplementation((params) => {
+  mockMakeZapRequest.mockImplementation((params) => {
     return {
       kind: 9734, // ZapRequest kind
       created_at: Math.floor(Date.now() / 1000),
@@ -239,13 +247,12 @@ describe("RelayPool Advanced Features", () => {
     relaypool.metadataCache.relays = [`ws://localhost:${targetServer.port}/`];
 
     // Configure the mock implementations for this test
-    const mockGetZapEndpoint = nip57.getZapEndpoint as jest.Mock;
     mockGetZapEndpoint.mockImplementation(async (metadata) => {
       return "http://localhost:8080/zap_callback"; // Directly return the mock callback URL
     });
   
     // Mock global.fetch for the final invoice request
-    jest.spyOn(global, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    const mockFetch = jest.spyOn(global, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();
       if (url.startsWith("http://localhost:8080/zap_callback")) { // Match URL with query parameters
         return Promise.resolve(new Response(JSON.stringify({
@@ -288,8 +295,8 @@ describe("RelayPool Advanced Features", () => {
     assertDefined(receivedZapEvent);
     assertEqual(receivedZapEvent?.id, zapRequestEvent.id);
   
-    // Restore original fetch
-    (global.fetch as jest.Mock).mockRestore();
+    mockFetch.mockRestore();
+    mockGetZapEndpoint.mockReset();
 
     await relaypool.close();
     await targetServer.close();

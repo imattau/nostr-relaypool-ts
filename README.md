@@ -79,6 +79,16 @@ relayPool.onerror((url, err) => console.error(url, err));
 relayPool.subscribe(..., ...);
 ```
 
+# CLI Example
+
+Two CLI entrypoints live under `examples/cli`: `auto.ts` runs a fully automated flow (connect, fetch, publish, exit) and `manual.ts` keeps a prompt open so you can publish on demand.
+
+- `npm run auto` (alias `npm run start`) executes `examples/cli/auto.ts` with ts-node, hits your local `ws://localhost:8081` relay, logs status changes, collects recent kind 1 notes, publishes one, and stops.
+- `npm run manual` starts `examples/cli/manual.ts`, which opens a `nostr>` prompt, prints relay statuses/notices/events, and accepts `help`, `status`, `publish`, and exit commands.
+- Override relays or reuse a key by setting `NOSTR_RELAYS="wss://relay.example.org"` and/or `NOSTR_PRIVATE_KEY=<hex-sk>` before running either script.
+
+Read `examples/cli/README.md` for more detail on both workflows.
+
 # API Documentation
 
 ## `RelayPool` Constructor

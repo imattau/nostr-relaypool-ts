@@ -11,7 +11,7 @@ export class InMemoryRelayServer {
   connections: Set<WebSocket> = new Set();
   totalSubscriptions = 0;
   port: number;
-  constructor(port = 8081, host = "localhost") {
+  constructor(port = 8081, host = "0.0.0.0") {
     this.port = port;
     this.wss = new WebSocketServer({port, host});
     this.wss.on("connection", (ws) => {
